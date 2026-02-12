@@ -1,0 +1,56 @@
+name: iOS TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: "Optional CFBundleVersion (defaults to timestamp)"
+        required: false
+        type: string
+
+jobs:
+  testflight:
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    env:
+      # App Store Connect API key (recommended: provide ASC_KEY_ID/ASC_ISSUER_ID/ASC_KEY_CONTENT)
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_CONTENT: ${{ secrets.ASC_KEY_CONTENT }}
+
+      # Apple Team ID (10 characters)
+      IOS_DEVELOPMENT_TEAM: ${{ secrets.IOS_DEVELOPMENT_TEAM }}
+
+      # Optional overrides
+      IOS_APP_IDENTIFIER: ${{ secrets.IOS_APP_IDENTIFIER }}
+      IOS_BUILD_NUMBER: ${{ inputs.build_number }}
+
+      # Ensure xcodebuild uses the full Xcode (runner already has it; this avoids xcode-select shenanigans)
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Install iOS build tools
+        run: |
+          brew install xcodegen swiftformat swiftlint fastlane
+
+      - name: Build + upload TestFlight
+        working-directory: apps/ios
+        run: fastlane beta

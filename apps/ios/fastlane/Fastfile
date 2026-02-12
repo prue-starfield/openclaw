@@ -74,6 +74,16 @@ platform :ios do
     # Generate the Xcode project from project.yml (xcodegen). The .xcodeproj is not checked in.
     sh("xcodegen generate")
 
+    # TestFlight requires monotonically increasing build numbers.
+    build_number = ENV["IOS_BUILD_NUMBER"]
+    if build_number.nil? || build_number.strip.empty?
+      build_number = Time.now.strftime("%Y%m%d%H%M")
+    end
+    UI.message("Using build number: #{build_number}")
+
+    set_info_plist_value(path: "Sources/Info.plist", key: "CFBundleVersion", value: build_number)
+    set_info_plist_value(path: "Tests/Info.plist", key: "CFBundleVersion", value: build_number)
+
     build_app(
       project: "OpenClaw.xcodeproj",
       scheme: "OpenClaw",
