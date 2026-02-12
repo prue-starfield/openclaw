@@ -1,4 +1,7 @@
 require "shellwords"
+require "base64"
+require "tmpdir"
+require "fileutils"
 
 default_platform(:ios)
 
@@ -72,7 +75,7 @@ platform :ios do
     UI.user_error!("Missing IOS_DEVELOPMENT_TEAM (Apple Team ID). Add it to fastlane/.env or export it in your shell.") if team_id.nil? || team_id.strip.empty?
 
     # Generate the Xcode project from project.yml (xcodegen). The .xcodeproj is not checked in.
-    sh("xcodegen generate")
+    sh("cd .. && xcodegen generate")
 
     # TestFlight requires monotonically increasing build numbers.
     build_number = ENV["IOS_BUILD_NUMBER"]
@@ -84,20 +87,85 @@ platform :ios do
     set_info_plist_value(path: "Sources/Info.plist", key: "CFBundleVersion", value: build_number)
     set_info_plist_value(path: "Tests/Info.plist", key: "CFBundleVersion", value: build_number)
 
-    build_app(
-      project: "OpenClaw.xcodeproj",
-      scheme: "OpenClaw",
-      export_method: "app-store",
-      clean: true,
-      xcargs: "DEVELOPMENT_TEAM=#{team_id} -allowProvisioningUpdates",
-      export_xcargs: "-allowProvisioningUpdates",
-      export_options: {
-        signingStyle: "automatic"
-      }
+    # For automatic signing, xcodebuild needs either:
+    # - an Apple ID account added in Xcode Settings → Accounts, OR
+    # - an App Store Connect API authentication key passed via -authenticationKey* flags.
+    # We prefer the API key so this can run headless (CI) without interactive login.
+    asc_key_id = ENV["ASC_KEY_ID"]
+    asc_issuer_id = ENV["ASC_ISSUER_ID"]
+
+    auth_key_path = ENV["ASC_KEY_PATH"]
+
+    # If only ASC_KEY_CONTENT is provided (e.g. CI secret), write it to a temp .p8 file.
+    if (auth_key_path.nil? || auth_key_path.strip.empty?)
+      key_content = ENV["ASC_KEY_CONTENT"]
+      if key_content && !key_content.strip.empty?
+        is_base64 = key_content.include?("BEGIN PRIVATE KEY") ? false : true
+        decoded = is_base64 ? Base64.decode64(key_content) : key_content
+        auth_key_path = File.join(Dir.tmpdir, "AuthKey_#{asc_key_id}.p8")
+        File.write(auth_key_path, decoded)
+        ENV["ASC_KEY_PATH"] = auth_key_path
+      end
+    end
+
+    auth_xcargs = ""
+    if auth_key_path && !auth_key_path.strip.empty?
+      UI.user_error!("Missing ASC_KEY_ID or ASC_ISSUER_ID (required for xcodebuild -authenticationKey* flags).") if [asc_key_id, asc_issuer_id].any? { |v| v.nil? || v.strip.empty? }
+      auth_xcargs = "-authenticationKeyPath #{auth_key_path.shellescape} -authenticationKeyID #{asc_key_id.shellescape} -authenticationKeyIssuerID #{asc_issuer_id.shellescape}"
+    end
+
+    # NOTE: fastlane gym's export/profile detection is flaky with modern Xcode + automatic signing.
+    # We run xcodebuild archive/export directly (with -authenticationKey*) and then upload the .ipa.
+
+    timestamp = Time.now.strftime("%Y-%m-%d %H.%M.%S")
+    archive_path = File.expand_path("~/Library/Developer/Xcode/Archives/#{Time.now.strftime("%Y-%m-%d")}/OpenClaw #{timestamp}.xcarchive")
+
+    export_dir = File.join(Dir.tmpdir, "openclaw-export-#{build_number}")
+    FileUtils.mkdir_p(export_dir)
+
+    export_options_path = File.join(export_dir, "ExportOptions.plist")
+    File.write(
+      export_options_path,
+      <<~PLIST
+        <?xml version=\"1.0\" encoding=\"UTF-8\"?>
+        <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+        <plist version=\"1.0\">
+        <dict>
+          <key>method</key>
+          <string>app-store-connect</string>
+          <key>signingStyle</key>
+          <string>automatic</string>
+          <key>teamID</key>
+          <string>#{team_id}</string>
+        </dict>
+        </plist>
+      PLIST
     )
+
+    sh(
+      "cd .. && set -o pipefail && xcodebuild " \
+      "-scheme OpenClaw -project OpenClaw.xcodeproj " \
+      "-destination 'generic/platform=iOS' " \
+      "-archivePath #{archive_path.shellescape} " \
+      "DEVELOPMENT_TEAM=#{team_id.shellescape} " \
+      "-allowProvisioningUpdates #{auth_xcargs} " \
+      "clean archive"
+    )
+
+    sh(
+      "xcodebuild -exportArchive " \
+      "-archivePath #{archive_path.shellescape} " \
+      "-exportPath #{export_dir.shellescape} " \
+      "-exportOptionsPlist #{export_options_path.shellescape} " \
+      "-allowProvisioningUpdates #{auth_xcargs}"
+    )
+
+    ipa_path = File.join(export_dir, "OpenClaw.ipa")
+    UI.user_error!("Expected IPA at #{ipa_path}, but it was not found") unless File.exist?(ipa_path)
 
     upload_to_testflight(
       api_key: api_key,
+      ipa: ipa_path,
       skip_waiting_for_build_processing: true
     )
   end
