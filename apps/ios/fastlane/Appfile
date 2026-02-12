@@ -1,5 +1,5 @@
 # Override with IOS_APP_IDENTIFIER for your own bundle id.
-app_identifier(ENV["IOS_APP_IDENTIFIER"] || "com.jsholmes.openclaw")
+app_identifier(ENV["IOS_APP_IDENTIFIER"] || "com.pruestarfield.OpenClawNode")
 
 # Auth is expected via App Store Connect API key.
 # Provide either:

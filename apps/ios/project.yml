@@ -1,6 +1,6 @@
 name: OpenClaw
 options:
-  bundleIdPrefix: com.jsholmes
+  bundleIdPrefix: com.pruestarfield
   deploymentTarget:
     iOS: "18.0"
   xcodeVersion: "16.0"
@@ -70,14 +70,14 @@ targets:
       base:
         # Use Automatic signing. Team ID is injected at build time (Xcode UI or fastlane).
         CODE_SIGN_STYLE: Automatic
-        PRODUCT_BUNDLE_IDENTIFIER: com.jsholmes.openclaw
+        PRODUCT_BUNDLE_IDENTIFIER: com.pruestarfield.OpenClawNode
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         ENABLE_APPINTENTS_METADATA: NO
     info:
       path: Sources/Info.plist
       properties:
-        CFBundleDisplayName: OpenClaw
+        CFBundleDisplayName: Prue Node
         CFBundleIconName: AppIcon
         CFBundleShortVersionString: "2026.2.10"
         CFBundleVersion: "20260202"
@@ -119,7 +119,7 @@ targets:
       - sdk: AppIntents.framework
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.jsholmes.openclaw.tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.pruestarfield.OpenClawNodeTests
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/OpenClaw.app/OpenClaw"
