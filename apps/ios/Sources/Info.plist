@@ -41,6 +41,10 @@
 	<string>OpenClaw uses your location when you allow location sharing.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>OpenClaw needs microphone access for voice wake.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>OpenClaw may use motion data to support motion-based features and diagnostics.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>OpenClaw can attach photos from your library when you choose to send them.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>OpenClaw uses on-device speech recognition for voice wake.</string>
 	<key>UIApplicationSceneManifest</key>
