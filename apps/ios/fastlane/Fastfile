@@ -71,6 +71,9 @@ platform :ios do
     end
     UI.user_error!("Missing IOS_DEVELOPMENT_TEAM (Apple Team ID). Add it to fastlane/.env or export it in your shell.") if team_id.nil? || team_id.strip.empty?
 
+    # Generate the Xcode project from project.yml (xcodegen). The .xcodeproj is not checked in.
+    sh("xcodegen generate")
+
     build_app(
       project: "OpenClaw.xcodeproj",
       scheme: "OpenClaw",
