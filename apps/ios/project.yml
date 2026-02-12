@@ -95,6 +95,8 @@ targets:
         NSLocationWhenInUseUsageDescription: OpenClaw uses your location when you allow location sharing.
         NSLocationAlwaysAndWhenInUseUsageDescription: OpenClaw can share your location in the background when you enable Always.
         NSMicrophoneUsageDescription: OpenClaw needs microphone access for voice wake.
+        NSMotionUsageDescription: OpenClaw may use motion data to support motion-based features and diagnostics.
+        NSPhotoLibraryUsageDescription: OpenClaw can attach photos from your library when you choose to send them.
         NSSpeechRecognitionUsageDescription: OpenClaw uses on-device speech recognition for voice wake.
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

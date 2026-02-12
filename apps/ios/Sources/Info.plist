@@ -21,7 +21,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>2026.2.10</string>
 	<key>CFBundleVersion</key>
-	<string>202602120033</string>
+	<string>20260202</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoadsInWebContent</key>
