@@ -19,6 +19,7 @@ import {
   type PortUsageStatus,
 } from "../../infra/ports.js";
 import { pickPrimaryTailnetIPv4 } from "../../infra/tailnet.js";
+import { loadGatewayTlsRuntime } from "../../infra/tls/gateway.js";
 import { probeGatewayStatus } from "./probe.js";
 import { normalizeListenerAddress, parsePortFromArgs, pickProbeHostForBind } from "./shared.js";
 import type { GatewayRpcOpts } from "./types.js";
@@ -37,6 +38,7 @@ type GatewayStatusSummary = {
   customBindHost?: string;
   port: number;
   portSource: "service args" | "env/config";
+  tlsEnabled: boolean;
   probeUrl: string;
   probeNote?: string;
 };
@@ -180,15 +182,23 @@ export async function gatherDaemonStatus(
   const bindHost = await resolveGatewayBindHost(bindMode, customBindHost);
   const tailnetIPv4 = pickPrimaryTailnetIPv4();
   const probeHost = pickProbeHostForBind(bindMode, tailnetIPv4, customBindHost);
+  const tlsEnabled = daemonCfg.gateway?.tls?.enabled === true;
+  const probeScheme = tlsEnabled ? "wss" : "ws";
   const probeUrlOverride =
     typeof opts.rpc.url === "string" && opts.rpc.url.trim().length > 0 ? opts.rpc.url.trim() : null;
-  const probeUrl = probeUrlOverride ?? `ws://${probeHost}:${daemonPort}`;
+  const probeUrl = probeUrlOverride ?? `${probeScheme}://${probeHost}:${daemonPort}`;
   const probeNote =
     !probeUrlOverride && bindMode === "lan"
       ? `bind=lan listens on 0.0.0.0 (all interfaces); probing via ${probeHost}.`
       : !probeUrlOverride && bindMode === "loopback"
         ? "Loopback-only gateway; only local clients can connect."
         : undefined;
+
+  const tlsRuntime =
+    tlsEnabled && !probeUrlOverride
+      ? await loadGatewayTlsRuntime(daemonCfg.gateway?.tls)
+      : undefined;
+  const probeTlsFingerprint = tlsRuntime?.enabled ? tlsRuntime.fingerprintSha256 : undefined;
 
   const cliPort = resolveGatewayPort(cliCfg, process.env);
   const [portDiagnostics, portCliDiagnostics] = await Promise.all([
@@ -223,6 +233,7 @@ export async function gatherDaemonStatus(
   const rpc = opts.probe
     ? await probeGatewayStatus({
         url: probeUrl,
+        tlsFingerprint: probeTlsFingerprint,
         token:
           opts.rpc.token ||
           mergedDaemonEnv.OPENCLAW_GATEWAY_TOKEN ||
@@ -263,6 +274,7 @@ export async function gatherDaemonStatus(
       customBindHost,
       port: daemonPort,
       portSource,
+      tlsEnabled,
       probeUrl,
       ...(probeNote ? { probeNote } : {}),
     },

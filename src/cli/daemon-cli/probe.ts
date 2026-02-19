@@ -4,6 +4,7 @@ import { withProgress } from "../progress.js";
 
 export async function probeGatewayStatus(opts: {
   url: string;
+  tlsFingerprint?: string;
   token?: string;
   password?: string;
   timeoutMs: number;
@@ -20,6 +21,7 @@ export async function probeGatewayStatus(opts: {
       async () =>
         await callGateway({
           url: opts.url,
+          tlsFingerprint: opts.tlsFingerprint,
           token: opts.token,
           password: opts.password,
           method: "status",
