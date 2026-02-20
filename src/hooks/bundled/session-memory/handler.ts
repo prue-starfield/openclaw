@@ -17,6 +17,7 @@ import { hasInterSessionUserProvenance } from "../../../sessions/input-provenanc
 import { resolveHookConfig } from "../../config.js";
 import type { HookHandler } from "../../hooks.js";
 import { generateSlugViaLLM } from "../../llm-slug-generator.js";
+import { generateSessionSummary } from "./llm-summary.js";
 
 const log = createSubsystemLogger("hooks/session-memory");
 
@@ -354,10 +355,23 @@ const saveSessionToMemory: HookHandler = async (event) => {
 
     const noiseFilter = resolveNoiseFilter(hookConfig);
 
+    // Summary config.
+    const summaryEnabled = hookConfig?.summary === true;
+    const summaryModel =
+      typeof hookConfig?.summaryModel === "string" ? hookConfig.summaryModel : undefined;
+    const summaryMaxTokens =
+      typeof hookConfig?.summaryMaxTokens === "number" && hookConfig.summaryMaxTokens > 0
+        ? hookConfig.summaryMaxTokens
+        : undefined;
+
     let slug: string | null = null;
     let sessionContent: string | null = null;
 
-    if (sessionFile && includeExcerpt) {
+    // We need session content for both the excerpt and the summary, so load it
+    // when *either* feature is enabled.
+    const needsSessionContent = includeExcerpt || summaryEnabled;
+
+    if (sessionFile && needsSessionContent) {
       // Get recent conversation content, with fallback to rotated reset transcript.
       sessionContent = await getRecentSessionContentWithResetFallback(
         sessionFile,
@@ -417,9 +431,33 @@ const saveSessionToMemory: HookHandler = async (event) => {
       "",
     ];
 
-    // Include conversation content if available
-    if (sessionContent) {
-      entryParts.push("## Conversation Summary", "", sessionContent, "");
+    // LLM-generated summary (opt-in).
+    if (summaryEnabled && sessionContent && cfg) {
+      const isTestEnv =
+        process.env.OPENCLAW_TEST_FAST === "1" ||
+        process.env.VITEST === "true" ||
+        process.env.VITEST === "1" ||
+        process.env.NODE_ENV === "test";
+
+      if (!isTestEnv) {
+        log.debug("Generating LLM session summary...");
+        const summaryResult = await generateSessionSummary({
+          sessionContent,
+          cfg,
+          summaryModel,
+          summaryMaxTokens,
+        });
+        if (summaryResult) {
+          entryParts.push(summaryResult.markdown, "");
+        } else {
+          log.warn("LLM summary generation failed; falling back to excerpt only");
+        }
+      }
+    }
+
+    // Include conversation excerpt if available and enabled.
+    if (sessionContent && includeExcerpt) {
+      entryParts.push("## Conversation Excerpt", "", sessionContent, "");
     }
 
     const entry = entryParts.join("\n");

@@ -11,6 +11,12 @@ vi.mock("../../llm-slug-generator.js", () => ({
   generateSlugViaLLM: vi.fn().mockResolvedValue("simple-math"),
 }));
 
+// Mock the LLM summary generator — tests control the return value via mockResolvedValueOnce.
+const mockGenerateSessionSummary = vi.fn().mockResolvedValue(null);
+vi.mock("./llm-summary.js", () => ({
+  generateSessionSummary: (...args: unknown[]) => mockGenerateSessionSummary(...args),
+}));
+
 let handler: HookHandler;
 
 beforeAll(async () => {
@@ -376,7 +382,7 @@ Ok now real text`;
     expect(memoryContent).toContain("user: Message 10");
   });
 
-  it("supports includeExcerpt=false (no Conversation Summary section)", async () => {
+  it("supports includeExcerpt=false (no Conversation Excerpt section)", async () => {
     const sessionContent = createMockSessionContent([
       { role: "user", content: "Hello" },
       { role: "assistant", content: "World" },
@@ -386,6 +392,7 @@ Ok now real text`;
       cfg: (tempDir) => makeSessionMemoryConfig(tempDir, { includeExcerpt: false }),
     });
 
+    expect(memoryContent).not.toContain("## Conversation Excerpt");
     expect(memoryContent).not.toContain("## Conversation Summary");
     expect(memoryContent).not.toContain("user: Hello");
     expect(memoryContent).not.toContain("assistant: World");
@@ -590,5 +597,68 @@ Ok now real text`;
     // Both messages should be included
     expect(memoryContent).toContain("user: Only message 1");
     expect(memoryContent).toContain("assistant: Only message 2");
+  });
+
+  it("does not call summary generator when summary is disabled (default)", async () => {
+    mockGenerateSessionSummary.mockClear();
+    const sessionContent = createMockSessionContent([
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "World" },
+    ]);
+    await runNewWithPreviousSession({ sessionContent });
+
+    // summary config is false by default → generator should not be called
+    expect(mockGenerateSessionSummary).not.toHaveBeenCalled();
+  });
+
+  it("does not call summary generator in test environment even when enabled", async () => {
+    mockGenerateSessionSummary.mockClear();
+    const sessionContent = createMockSessionContent([
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "World" },
+    ]);
+    // Even with summary: true, the test env guard should prevent calling the LLM.
+    await runNewWithPreviousSession({
+      sessionContent,
+      cfg: (tempDir) => ({
+        agents: { defaults: { workspace: tempDir } },
+        hooks: {
+          internal: {
+            entries: {
+              "session-memory": { enabled: true, summary: true },
+            },
+          },
+        },
+      }),
+    });
+
+    // In test env (VITEST=true), LLM calls are skipped.
+    expect(mockGenerateSessionSummary).not.toHaveBeenCalled();
+  });
+
+  it("uses 'Conversation Excerpt' heading (not 'Summary') when excerpt is included", async () => {
+    const sessionContent = createMockSessionContent([
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "World" },
+    ]);
+    const { memoryContent } = await runNewWithPreviousSession({ sessionContent });
+
+    expect(memoryContent).toContain("## Conversation Excerpt");
+    expect(memoryContent).not.toContain("## Conversation Summary");
+  });
+
+  it("still writes excerpt when summary generation would fail (graceful degradation)", async () => {
+    // This tests that even if the summary generator were to fail,
+    // the excerpt section is still written as a fallback.
+    const sessionContent = createMockSessionContent([
+      { role: "user", content: "Important question" },
+      { role: "assistant", content: "Important answer" },
+    ]);
+    const { memoryContent } = await runNewWithPreviousSession({ sessionContent });
+
+    // Excerpt should always be present when includeExcerpt is true (default)
+    expect(memoryContent).toContain("## Conversation Excerpt");
+    expect(memoryContent).toContain("user: Important question");
+    expect(memoryContent).toContain("assistant: Important answer");
   });
 });
