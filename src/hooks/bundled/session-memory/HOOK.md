@@ -1,7 +1,7 @@
 ---
 name: session-memory
 description: "Save session context to memory when /new command is issued"
-homepage: https://docs.openclaw.ai/hooks#session-memory
+homepage: https://docs.openclaw.ai/automation/hooks#session-memory
 metadata:
   {
     "openclaw":
@@ -23,10 +23,9 @@ Automatically saves session context to your workspace memory when you issue the 
 When you run `/new` to start a fresh session:
 
 1. **Finds the previous session** - Uses the pre-reset session entry to locate the correct transcript
-2. **Extracts conversation** - Reads the last N user/assistant messages from the session (default: 15, configurable)
+2. **Extracts conversation excerpt** - Reads the last N user/assistant messages from the session (default: 15, configurable)
 3. **Generates descriptive slug** - Uses LLM to create a meaningful filename slug based on conversation content
 4. **Saves to memory** - Creates a new file at `<workspace>/memory/YYYY-MM-DD-slug.md`
-5. **Sends confirmation** - Notifies you with the file path
 
 ## Output Format
 
@@ -38,6 +37,11 @@ Memory files are created with the following format:
 - **Session Key**: agent:main:main
 - **Session ID**: abc123def456
 - **Source**: telegram
+
+## Conversation Summary
+
+user: ...
+assistant: ...
 ```
 
 ## Filename Examples
@@ -59,9 +63,15 @@ The hook uses your configured LLM provider to generate slugs, so it works with a
 
 The hook supports optional configuration:
 
-| Option     | Type   | Default | Description                                                     |
-| ---------- | ------ | ------- | --------------------------------------------------------------- |
-| `messages` | number | 15      | Number of user/assistant messages to include in the memory file |
+| Option            | Type     | Default | Description                                                           |
+| ----------------- | -------- | ------- | --------------------------------------------------------------------- |
+| `excerptMessages` | number   | 15      | Number of user/assistant messages to include in the excerpt           |
+| `includeExcerpt`  | boolean  | true    | If false, do not include the conversation excerpt section             |
+| `messages`        | number   | 15      | Back-compat alias for `excerptMessages`                               |
+| `llmSlug`         | boolean  | true    | If false, disable LLM-based slug generation (timestamp slug fallback) |
+| `excludeExact`    | string[] | []      | Drop messages whose trimmed text matches one of these strings exactly |
+| `excludePrefixes` | string[] | []      | Drop messages whose trimmed text starts with one of these prefixes    |
+| `excludeRegexes`  | string[] | []      | Drop messages whose trimmed text matches any of these regex patterns  |
 
 Example configuration:
 
@@ -72,7 +82,8 @@ Example configuration:
       "entries": {
         "session-memory": {
           "enabled": true,
-          "messages": 25
+          "excerptMessages": 25,
+          "includeExcerpt": true
         }
       }
     }
@@ -80,11 +91,11 @@ Example configuration:
 }
 ```
 
-The hook automatically:
+Notes:
 
-- Uses your workspace directory (`~/.openclaw/workspace` by default)
-- Uses your configured LLM for slug generation
-- Falls back to timestamp slugs if LLM is unavailable
+- The excerpt is **noise-filtered** (common automation markers, heartbeat prompts, and large untrusted metadata blocks are removed) before slicing to `excerptMessages`.
+- You can add additional per-installation filtering using `excludeExact`, `excludePrefixes`, and/or `excludeRegexes`.
+- In test environments, LLM calls are disabled for determinism.
 
 ## Disabling
 
