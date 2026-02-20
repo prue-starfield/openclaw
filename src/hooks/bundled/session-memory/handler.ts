@@ -20,6 +20,45 @@ import { generateSlugViaLLM } from "../../llm-slug-generator.js";
 
 const log = createSubsystemLogger("hooks/session-memory");
 
+const UNTRUSTED_METADATA_BLOCK_RE =
+  /\n?\s*(Conversation info \(untrusted metadata\):|Replied message \(untrusted, for context\):)\s*\n```json\n[\s\S]*?\n```\s*/g;
+
+function stripNoiseBlocks(text: string): string {
+  // Remove large, noisy JSON metadata blocks that appear in tool-heavy sessions.
+  const stripped = text.replaceAll(UNTRUSTED_METADATA_BLOCK_RE, "\n");
+  return stripped.trim();
+}
+
+function isNoiseMessage(role: string, rawText: string): boolean {
+  const text = rawText.trim();
+
+  // Common automation markers.
+  if (text === "NO_REPLY" || text === "HEARTBEAT_OK") {
+    return true;
+  }
+
+  // Heartbeat prompts are not real conversation.
+  if (text.startsWith("Read HEARTBEAT.md") || text.startsWith("Default heartbeat prompt:")) {
+    return true;
+  }
+
+  // Voice reply artifacts (filenames) are not useful conversation summaries.
+  if (role === "assistant" && /^reply-.*\.mp3$/i.test(text)) {
+    return true;
+  }
+
+  // System / cron / tool plumbing messages often dominate excerpts.
+  if (
+    text.startsWith("System:") ||
+    text.startsWith("[System Message]") ||
+    text.includes("Queued messages while agent was busy")
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 /**
  * Read recent messages from session file for slug generation
  */
@@ -44,14 +83,25 @@ async function getRecentSessionContent(
             if (role === "user" && hasInterSessionUserProvenance(msg)) {
               continue;
             }
+
             // Extract text content
-            const text = Array.isArray(msg.content)
+            const textRaw = Array.isArray(msg.content)
               ? // oxlint-disable-next-line typescript/no-explicit-any
                 msg.content.find((c: any) => c.type === "text")?.text
               : msg.content;
-            if (text && !text.startsWith("/")) {
-              allMessages.push(`${role}: ${text}`);
+
+            if (!textRaw) {
+              continue;
             }
+
+            const text = stripNoiseBlocks(String(textRaw));
+
+            // Filter slash-commands, and common noise patterns.
+            if (!text || text.startsWith("/") || isNoiseMessage(role, text)) {
+              continue;
+            }
+
+            allMessages.push(`${role}: ${text}`);
           }
         }
       } catch {
@@ -234,20 +284,23 @@ const saveSessionToMemory: HookHandler = async (event) => {
 
     // Read message count from hook config (default: 15)
     const hookConfig = resolveHookConfig(cfg, "session-memory");
-    const messageCount =
-      typeof hookConfig?.messages === "number" && hookConfig.messages > 0
-        ? hookConfig.messages
-        : 15;
+    const excerptMessages =
+      typeof hookConfig?.excerptMessages === "number" && hookConfig.excerptMessages > 0
+        ? hookConfig.excerptMessages
+        : typeof hookConfig?.messages === "number" && hookConfig.messages > 0
+          ? hookConfig.messages
+          : 15;
+    const includeExcerpt = hookConfig?.includeExcerpt !== false;
 
     let slug: string | null = null;
     let sessionContent: string | null = null;
 
-    if (sessionFile) {
+    if (sessionFile && includeExcerpt) {
       // Get recent conversation content, with fallback to rotated reset transcript.
-      sessionContent = await getRecentSessionContentWithResetFallback(sessionFile, messageCount);
+      sessionContent = await getRecentSessionContentWithResetFallback(sessionFile, excerptMessages);
       log.debug("Session content loaded", {
         length: sessionContent?.length ?? 0,
-        messageCount,
+        excerptMessages,
       });
 
       // Avoid calling the model provider in unit tests; keep hooks fast and deterministic.

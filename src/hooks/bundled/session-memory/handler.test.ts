@@ -97,15 +97,24 @@ async function runNewWithPreviousSession(params: {
   return { tempDir, files, memoryContent };
 }
 
-function makeSessionMemoryConfig(tempDir: string, messages?: number): OpenClawConfig {
+function makeSessionMemoryConfig(
+  tempDir: string,
+  overrides?: Record<string, unknown> | number,
+): OpenClawConfig {
+  const hookEntry =
+    typeof overrides === "number"
+      ? { enabled: true, excerptMessages: overrides }
+      : overrides
+        ? { enabled: true, ...overrides }
+        : undefined;
   return {
     agents: { defaults: { workspace: tempDir } },
-    ...(typeof messages === "number"
+    ...(hookEntry
       ? {
           hooks: {
             internal: {
               entries: {
-                "session-memory": { enabled: true, messages },
+                "session-memory": hookEntry,
               },
             },
           },
@@ -286,7 +295,41 @@ describe("session-memory hook", () => {
     expect(memoryContent).toContain("user: Normal message");
   });
 
-  it("respects custom messages config (limits to N messages)", async () => {
+  it("filters out common automation noise (NO_REPLY, HEARTBEAT_OK, voice filenames)", async () => {
+    const sessionContent = createMockSessionContent([
+      { role: "assistant", content: "NO_REPLY" },
+      { role: "user", content: "HEARTBEAT_OK" },
+      { role: "assistant", content: "reply-9530-seed-90513.mp3" },
+      { role: "user", content: "Actual user question" },
+      { role: "assistant", content: "Actual assistant answer" },
+    ]);
+    const { memoryContent } = await runNewWithPreviousSession({ sessionContent });
+
+    expect(memoryContent).not.toContain("NO_REPLY");
+    expect(memoryContent).not.toContain("HEARTBEAT_OK");
+    expect(memoryContent).not.toContain("reply-9530");
+    expect(memoryContent).toContain("user: Actual user question");
+    expect(memoryContent).toContain("assistant: Actual assistant answer");
+  });
+
+  it("strips untrusted metadata JSON blocks from messages", async () => {
+    const noisy = `Conversation info (untrusted metadata):
+\`\`\`json
+{"message_id":"123"}
+\`\`\`
+Ok now real text`;
+    const sessionContent = createMockSessionContent([
+      { role: "user", content: noisy },
+      { role: "assistant", content: "Acknowledged" },
+    ]);
+    const { memoryContent } = await runNewWithPreviousSession({ sessionContent });
+
+    expect(memoryContent).toContain("user: Ok now real text");
+    expect(memoryContent).not.toContain("untrusted metadata");
+    expect(memoryContent).not.toContain("message_id");
+  });
+
+  it("respects custom excerptMessages config (limits to N messages)", async () => {
     // Create 10 messages
     const entries = [];
     for (let i = 1; i <= 10; i++) {
@@ -295,7 +338,7 @@ describe("session-memory hook", () => {
     const sessionContent = createMockSessionContent(entries);
     const { memoryContent } = await runNewWithPreviousSession({
       sessionContent,
-      cfg: (tempDir) => makeSessionMemoryConfig(tempDir, 3),
+      cfg: (tempDir) => makeSessionMemoryConfig(tempDir, { excerptMessages: 3 }),
     });
 
     // Only last 3 messages should be present
@@ -304,6 +347,21 @@ describe("session-memory hook", () => {
     expect(memoryContent).toContain("user: Message 8");
     expect(memoryContent).toContain("user: Message 9");
     expect(memoryContent).toContain("user: Message 10");
+  });
+
+  it("supports includeExcerpt=false (no Conversation Summary section)", async () => {
+    const sessionContent = createMockSessionContent([
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "World" },
+    ]);
+    const { memoryContent } = await runNewWithPreviousSession({
+      sessionContent,
+      cfg: (tempDir) => makeSessionMemoryConfig(tempDir, { includeExcerpt: false }),
+    });
+
+    expect(memoryContent).not.toContain("## Conversation Summary");
+    expect(memoryContent).not.toContain("user: Hello");
+    expect(memoryContent).not.toContain("assistant: World");
   });
 
   it("filters messages before slicing (fix for #2681)", async () => {
