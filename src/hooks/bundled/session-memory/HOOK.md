@@ -63,12 +63,15 @@ The hook uses your configured LLM provider to generate slugs, so it works with a
 
 The hook supports optional configuration:
 
-| Option            | Type    | Default | Description                                                           |
-| ----------------- | ------- | ------- | --------------------------------------------------------------------- |
-| `excerptMessages` | number  | 15      | Number of user/assistant messages to include in the excerpt           |
-| `includeExcerpt`  | boolean | true    | If false, do not include the conversation excerpt section             |
-| `messages`        | number  | 15      | Back-compat alias for `excerptMessages`                               |
-| `llmSlug`         | boolean | true    | If false, disable LLM-based slug generation (timestamp slug fallback) |
+| Option            | Type     | Default | Description                                                           |
+| ----------------- | -------- | ------- | --------------------------------------------------------------------- |
+| `excerptMessages` | number   | 15      | Number of user/assistant messages to include in the excerpt           |
+| `includeExcerpt`  | boolean  | true    | If false, do not include the conversation excerpt section             |
+| `messages`        | number   | 15      | Back-compat alias for `excerptMessages`                               |
+| `llmSlug`         | boolean  | true    | If false, disable LLM-based slug generation (timestamp slug fallback) |
+| `excludeExact`    | string[] | []      | Drop messages whose trimmed text matches one of these strings exactly |
+| `excludePrefixes` | string[] | []      | Drop messages whose trimmed text starts with one of these prefixes    |
+| `excludeRegexes`  | string[] | []      | Drop messages whose trimmed text matches any of these regex patterns  |
 
 Example configuration:
 
@@ -91,6 +94,7 @@ Example configuration:
 Notes:
 
 - The excerpt is **noise-filtered** (common automation markers, heartbeat prompts, and large untrusted metadata blocks are removed) before slicing to `excerptMessages`.
+- You can add additional per-installation filtering using `excludeExact`, `excludePrefixes`, and/or `excludeRegexes`.
 - In test environments, LLM calls are disabled for determinism.
 
 ## Disabling

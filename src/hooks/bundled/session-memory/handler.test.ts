@@ -295,11 +295,10 @@ describe("session-memory hook", () => {
     expect(memoryContent).toContain("user: Normal message");
   });
 
-  it("filters out common automation noise (NO_REPLY, HEARTBEAT_OK, voice filenames)", async () => {
+  it("filters out common automation noise (NO_REPLY, HEARTBEAT_OK)", async () => {
     const sessionContent = createMockSessionContent([
       { role: "assistant", content: "NO_REPLY" },
       { role: "user", content: "HEARTBEAT_OK" },
-      { role: "assistant", content: "reply-9530-seed-90513.mp3" },
       { role: "user", content: "Actual user question" },
       { role: "assistant", content: "Actual assistant answer" },
     ]);
@@ -307,6 +306,34 @@ describe("session-memory hook", () => {
 
     expect(memoryContent).not.toContain("NO_REPLY");
     expect(memoryContent).not.toContain("HEARTBEAT_OK");
+    expect(memoryContent).toContain("user: Actual user question");
+    expect(memoryContent).toContain("assistant: Actual assistant answer");
+  });
+
+  it("supports configurable noise filters (excludeRegexes)", async () => {
+    const sessionContent = createMockSessionContent([
+      { role: "assistant", content: "reply-9530-seed-90513.mp3" },
+      { role: "user", content: "Actual user question" },
+      { role: "assistant", content: "Actual assistant answer" },
+    ]);
+
+    const { memoryContent } = await runNewWithPreviousSession({
+      sessionContent,
+      cfg: (tempDir) => ({
+        agents: { defaults: { workspace: tempDir } },
+        hooks: {
+          internal: {
+            entries: {
+              "session-memory": {
+                enabled: true,
+                excludeRegexes: ["^reply-.*\\.mp3$"],
+              },
+            },
+          },
+        },
+      }),
+    });
+
     expect(memoryContent).not.toContain("reply-9530");
     expect(memoryContent).toContain("user: Actual user question");
     expect(memoryContent).toContain("assistant: Actual assistant answer");

@@ -29,7 +29,49 @@ function stripNoiseBlocks(text: string): string {
   return stripped.trim();
 }
 
-function isNoiseMessage(role: string, rawText: string): boolean {
+type SessionMemoryNoiseFilter = {
+  excludeExact: string[];
+  excludePrefixes: string[];
+  excludeRegexes: RegExp[];
+};
+
+function normaliseStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((v): v is string => typeof v === "string")
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
+function compileRegexes(patterns: string[]): RegExp[] {
+  const out: RegExp[] = [];
+  for (const pattern of patterns) {
+    try {
+      out.push(new RegExp(pattern));
+    } catch {
+      // Ignore invalid regex patterns (they are user config).
+    }
+  }
+  return out;
+}
+
+function resolveNoiseFilter(hookConfig: unknown): SessionMemoryNoiseFilter {
+  // Hook configs are schema-free (Record<string, unknown>), so keep this defensive.
+  const cfg = (hookConfig ?? {}) as Record<string, unknown>;
+  const excludeExact = normaliseStringArray(cfg.excludeExact);
+  const excludePrefixes = normaliseStringArray(cfg.excludePrefixes);
+  const excludeRegexes = compileRegexes(normaliseStringArray(cfg.excludeRegexes));
+
+  return { excludeExact, excludePrefixes, excludeRegexes };
+}
+
+function isNoiseMessage(
+  role: string,
+  rawText: string,
+  noiseFilter: SessionMemoryNoiseFilter,
+): boolean {
   const text = rawText.trim();
 
   // Common automation markers.
@@ -42,17 +84,25 @@ function isNoiseMessage(role: string, rawText: string): boolean {
     return true;
   }
 
-  // Voice reply artifacts (filenames) are not useful conversation summaries.
-  if (role === "assistant" && /^reply-.*\.mp3$/i.test(text)) {
-    return true;
-  }
-
   // System / cron / tool plumbing messages often dominate excerpts.
   if (
     text.startsWith("System:") ||
     text.startsWith("[System Message]") ||
     text.includes("Queued messages while agent was busy")
   ) {
+    return true;
+  }
+
+  // Configurable exclusions (for per-installation noise).
+  if (noiseFilter.excludeExact.includes(text)) {
+    return true;
+  }
+
+  if (noiseFilter.excludePrefixes.some((prefix) => text.startsWith(prefix))) {
+    return true;
+  }
+
+  if (noiseFilter.excludeRegexes.some((re) => re.test(text))) {
     return true;
   }
 
@@ -65,6 +115,11 @@ function isNoiseMessage(role: string, rawText: string): boolean {
 async function getRecentSessionContent(
   sessionFilePath: string,
   messageCount: number = 15,
+  noiseFilter: SessionMemoryNoiseFilter = {
+    excludeExact: [],
+    excludePrefixes: [],
+    excludeRegexes: [],
+  },
 ): Promise<string | null> {
   try {
     const content = await fs.readFile(sessionFilePath, "utf-8");
@@ -97,7 +152,7 @@ async function getRecentSessionContent(
             const text = stripNoiseBlocks(String(textRaw));
 
             // Filter slash-commands, and common noise patterns.
-            if (!text || text.startsWith("/") || isNoiseMessage(role, text)) {
+            if (!text || text.startsWith("/") || isNoiseMessage(role, text, noiseFilter)) {
               continue;
             }
 
@@ -124,8 +179,13 @@ async function getRecentSessionContent(
 async function getRecentSessionContentWithResetFallback(
   sessionFilePath: string,
   messageCount: number = 15,
+  noiseFilter: SessionMemoryNoiseFilter = {
+    excludeExact: [],
+    excludePrefixes: [],
+    excludeRegexes: [],
+  },
 ): Promise<string | null> {
-  const primary = await getRecentSessionContent(sessionFilePath, messageCount);
+  const primary = await getRecentSessionContent(sessionFilePath, messageCount, noiseFilter);
   if (primary) {
     return primary;
   }
@@ -142,7 +202,7 @@ async function getRecentSessionContentWithResetFallback(
     }
 
     const latestResetPath = path.join(dir, resetCandidates[resetCandidates.length - 1]);
-    const fallback = await getRecentSessionContent(latestResetPath, messageCount);
+    const fallback = await getRecentSessionContent(latestResetPath, messageCount, noiseFilter);
 
     if (fallback) {
       log.debug("Loaded session content from reset fallback", {
@@ -292,12 +352,18 @@ const saveSessionToMemory: HookHandler = async (event) => {
           : 15;
     const includeExcerpt = hookConfig?.includeExcerpt !== false;
 
+    const noiseFilter = resolveNoiseFilter(hookConfig);
+
     let slug: string | null = null;
     let sessionContent: string | null = null;
 
     if (sessionFile && includeExcerpt) {
       // Get recent conversation content, with fallback to rotated reset transcript.
-      sessionContent = await getRecentSessionContentWithResetFallback(sessionFile, excerptMessages);
+      sessionContent = await getRecentSessionContentWithResetFallback(
+        sessionFile,
+        excerptMessages,
+        noiseFilter,
+      );
       log.debug("Session content loaded", {
         length: sessionContent?.length ?? 0,
         excerptMessages,
