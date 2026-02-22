@@ -8,13 +8,13 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { OpenClawConfig } from "../../../config/config.js";
 import {
   resolveDefaultAgentId,
   resolveAgentWorkspaceDir,
   resolveAgentDir,
 } from "../../../agents/agent-scope.js";
 import { runEmbeddedPiAgent } from "../../../agents/pi-embedded.js";
+import type { OpenClawConfig } from "../../../config/config.js";
 import { createSubsystemLogger } from "../../../logging/subsystem.js";
 
 const log = createSubsystemLogger("hooks/session-memory/llm-summary");
@@ -90,6 +90,19 @@ export async function generateSessionSummary(
 
     const userPrompt = `Summarise this session transcript:\n\n${transcript}`;
 
+    // Parse optional model override (accepts "provider/model" or just "model").
+    let provider: string | undefined;
+    let model: string | undefined;
+    if (params.summaryModel) {
+      const parts = params.summaryModel.split("/");
+      if (parts.length >= 2) {
+        provider = parts[0];
+        model = parts.slice(1).join("/");
+      } else {
+        model = params.summaryModel;
+      }
+    }
+
     const result = await runEmbeddedPiAgent({
       sessionId: `session-summary-${Date.now()}`,
       sessionKey: "temp:session-summary",
@@ -103,11 +116,16 @@ export async function generateSessionSummary(
       disableTools: true,
       timeoutMs: params.timeoutMs ?? 30_000,
       runId: `summary-gen-${Date.now()}`,
+      ...(provider ? { provider } : {}),
+      ...(model ? { model } : {}),
     });
 
-    // Extract text from payloads.
+    // Extract text from all payloads (the response may be split across multiple).
     if (result.payloads && result.payloads.length > 0) {
-      const text = result.payloads[0]?.text?.trim();
+      const text = result.payloads
+        .map((p) => p.text?.trim())
+        .filter(Boolean)
+        .join("\n\n");
       if (text && text.length > 20) {
         log.debug("Summary generated", { length: text.length });
         return { markdown: text };

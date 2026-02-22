@@ -647,6 +647,61 @@ Ok now real text`;
     expect(memoryContent).not.toContain("## Conversation Summary");
   });
 
+  it("inserts LLM summary before excerpt when summary is enabled and generation succeeds", async () => {
+    mockGenerateSessionSummary.mockClear();
+    mockGenerateSessionSummary.mockResolvedValueOnce({
+      markdown:
+        "## Summary\n\nThe user asked about widgets and the assistant explained widget theory.",
+    });
+
+    const sessionContent = createMockSessionContent([
+      { role: "user", content: "Tell me about widgets" },
+      { role: "assistant", content: "Widgets are fascinating devices." },
+    ]);
+
+    // Temporarily clear test-env signals to bypass the isTestEnv guard.
+    const origVitest = process.env.VITEST;
+    const origNodeEnv = process.env.NODE_ENV;
+    const origTestFast = process.env.OPENCLAW_TEST_FAST;
+    delete process.env.VITEST;
+    delete process.env.OPENCLAW_TEST_FAST;
+    process.env.NODE_ENV = "production";
+    try {
+      const { memoryContent } = await runNewWithPreviousSession({
+        sessionContent,
+        cfg: (tempDir) => ({
+          agents: { defaults: { workspace: tempDir } },
+          hooks: {
+            internal: {
+              entries: {
+                "session-memory": { enabled: true, summary: true },
+              },
+            },
+          },
+        }),
+      });
+
+      // Summary generator should have been called.
+      expect(mockGenerateSessionSummary).toHaveBeenCalledOnce();
+
+      // Summary markdown should appear in the output before the excerpt.
+      expect(memoryContent).toContain("## Summary");
+      expect(memoryContent).toContain("widget theory");
+      expect(memoryContent).toContain("## Conversation Excerpt");
+
+      // Summary should appear before the excerpt.
+      const summaryIdx = memoryContent.indexOf("## Summary");
+      const excerptIdx = memoryContent.indexOf("## Conversation Excerpt");
+      expect(summaryIdx).toBeLessThan(excerptIdx);
+    } finally {
+      process.env.VITEST = origVitest;
+      process.env.NODE_ENV = origNodeEnv;
+      if (origTestFast !== undefined) {
+        process.env.OPENCLAW_TEST_FAST = origTestFast;
+      }
+    }
+  });
+
   it("still writes excerpt when summary generation would fail (graceful degradation)", async () => {
     // This tests that even if the summary generator were to fail,
     // the excerpt section is still written as a fallback.

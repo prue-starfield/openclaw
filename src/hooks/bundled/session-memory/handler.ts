@@ -51,8 +51,11 @@ function compileRegexes(patterns: string[]): RegExp[] {
   for (const pattern of patterns) {
     try {
       out.push(new RegExp(pattern));
-    } catch {
-      // Ignore invalid regex patterns (they are user config).
+    } catch (err) {
+      log.warn("Invalid excludeRegexes pattern (skipped)", {
+        pattern,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
   return out;
@@ -253,8 +256,7 @@ async function findPreviousSessionFile(params: {
             name.endsWith(".jsonl") &&
             !name.includes(".reset."),
         )
-        .toSorted()
-        .toReversed();
+        .toSorted((a, b) => b.localeCompare(a));
       if (topicVariants.length > 0) {
         return path.join(params.sessionsDir, topicVariants[0]);
       }
@@ -266,8 +268,7 @@ async function findPreviousSessionFile(params: {
 
     const nonResetJsonl = files
       .filter((name) => name.endsWith(".jsonl") && !name.includes(".reset."))
-      .toSorted()
-      .toReversed();
+      .toSorted((a, b) => b.localeCompare(a));
     if (nonResetJsonl.length > 0) {
       return path.join(params.sessionsDir, nonResetJsonl[0]);
     }
@@ -371,6 +372,13 @@ const saveSessionToMemory: HookHandler = async (event) => {
     // when *either* feature is enabled.
     const needsSessionContent = includeExcerpt || summaryEnabled;
 
+    // Avoid calling model providers in unit tests; keep hooks fast and deterministic.
+    const isTestEnv =
+      process.env.OPENCLAW_TEST_FAST === "1" ||
+      process.env.VITEST === "true" ||
+      process.env.VITEST === "1" ||
+      process.env.NODE_ENV === "test";
+
     if (sessionFile && needsSessionContent) {
       // Get recent conversation content, with fallback to rotated reset transcript.
       sessionContent = await getRecentSessionContentWithResetFallback(
@@ -383,12 +391,6 @@ const saveSessionToMemory: HookHandler = async (event) => {
         excerptMessages,
       });
 
-      // Avoid calling the model provider in unit tests; keep hooks fast and deterministic.
-      const isTestEnv =
-        process.env.OPENCLAW_TEST_FAST === "1" ||
-        process.env.VITEST === "true" ||
-        process.env.VITEST === "1" ||
-        process.env.NODE_ENV === "test";
       const allowLlmSlug = !isTestEnv && hookConfig?.llmSlug !== false;
 
       if (sessionContent && cfg && allowLlmSlug) {
@@ -433,12 +435,6 @@ const saveSessionToMemory: HookHandler = async (event) => {
 
     // LLM-generated summary (opt-in).
     if (summaryEnabled && sessionContent && cfg) {
-      const isTestEnv =
-        process.env.OPENCLAW_TEST_FAST === "1" ||
-        process.env.VITEST === "true" ||
-        process.env.VITEST === "1" ||
-        process.env.NODE_ENV === "test";
-
       if (!isTestEnv) {
         log.debug("Generating LLM session summary...");
         const summaryResult = await generateSessionSummary({
