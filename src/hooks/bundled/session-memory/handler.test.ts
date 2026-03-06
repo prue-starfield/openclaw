@@ -12,6 +12,12 @@ vi.mock("../../llm-slug-generator.js", () => ({
   generateSlugViaLLM: vi.fn().mockResolvedValue("simple-math"),
 }));
 
+// Mock the LLM summary generator — tests control the return value via mockResolvedValueOnce.
+const mockGenerateSessionSummary = vi.fn().mockResolvedValue(null);
+vi.mock("./llm-summary.js", () => ({
+  generateSessionSummary: (...args: unknown[]) => mockGenerateSessionSummary(...args),
+}));
+
 let handler: HookHandler;
 let suiteWorkspaceRoot = "";
 let workspaceCaseCounter = 0;
@@ -117,15 +123,24 @@ async function runNewWithPreviousSession(params: {
   return { tempDir, files, memoryContent };
 }
 
-function makeSessionMemoryConfig(tempDir: string, messages?: number): OpenClawConfig {
+function makeSessionMemoryConfig(
+  tempDir: string,
+  overrides?: Record<string, unknown> | number,
+): OpenClawConfig {
+  const hookEntry =
+    typeof overrides === "number"
+      ? { enabled: true, excerptMessages: overrides }
+      : overrides
+        ? { enabled: true, ...overrides }
+        : undefined;
   return {
     agents: { defaults: { workspace: tempDir } },
-    ...(typeof messages === "number"
+    ...(hookEntry
       ? {
           hooks: {
             internal: {
               entries: {
-                "session-memory": { enabled: true, messages },
+                "session-memory": hookEntry,
               },
             },
           },
@@ -306,7 +321,68 @@ describe("session-memory hook", () => {
     expect(memoryContent).toContain("user: Normal message");
   });
 
-  it("respects custom messages config (limits to N messages)", async () => {
+  it("filters out common automation noise (NO_REPLY, HEARTBEAT_OK)", async () => {
+    const sessionContent = createMockSessionContent([
+      { role: "assistant", content: "NO_REPLY" },
+      { role: "user", content: "HEARTBEAT_OK" },
+      { role: "user", content: "Actual user question" },
+      { role: "assistant", content: "Actual assistant answer" },
+    ]);
+    const { memoryContent } = await runNewWithPreviousSession({ sessionContent });
+
+    expect(memoryContent).not.toContain("NO_REPLY");
+    expect(memoryContent).not.toContain("HEARTBEAT_OK");
+    expect(memoryContent).toContain("user: Actual user question");
+    expect(memoryContent).toContain("assistant: Actual assistant answer");
+  });
+
+  it("supports configurable noise filters (excludeRegexes)", async () => {
+    const sessionContent = createMockSessionContent([
+      { role: "assistant", content: "reply-9530-seed-90513.mp3" },
+      { role: "user", content: "Actual user question" },
+      { role: "assistant", content: "Actual assistant answer" },
+    ]);
+
+    const { memoryContent } = await runNewWithPreviousSession({
+      sessionContent,
+      cfg: (tempDir) => ({
+        agents: { defaults: { workspace: tempDir } },
+        hooks: {
+          internal: {
+            entries: {
+              "session-memory": {
+                enabled: true,
+                excludeRegexes: ["^reply-.*\\.mp3$"],
+              },
+            },
+          },
+        },
+      }),
+    });
+
+    expect(memoryContent).not.toContain("reply-9530");
+    expect(memoryContent).toContain("user: Actual user question");
+    expect(memoryContent).toContain("assistant: Actual assistant answer");
+  });
+
+  it("strips untrusted metadata JSON blocks from messages", async () => {
+    const noisy = `Conversation info (untrusted metadata):
+\`\`\`json
+{"message_id":"123"}
+\`\`\`
+Ok now real text`;
+    const sessionContent = createMockSessionContent([
+      { role: "user", content: noisy },
+      { role: "assistant", content: "Acknowledged" },
+    ]);
+    const { memoryContent } = await runNewWithPreviousSession({ sessionContent });
+
+    expect(memoryContent).toContain("user: Ok now real text");
+    expect(memoryContent).not.toContain("untrusted metadata");
+    expect(memoryContent).not.toContain("message_id");
+  });
+
+  it("respects custom excerptMessages config (limits to N messages)", async () => {
     // Create 10 messages
     const entries = [];
     for (let i = 1; i <= 10; i++) {
@@ -315,7 +391,7 @@ describe("session-memory hook", () => {
     const sessionContent = createMockSessionContent(entries);
     const { memoryContent } = await runNewWithPreviousSession({
       sessionContent,
-      cfg: (tempDir) => makeSessionMemoryConfig(tempDir, 3),
+      cfg: (tempDir) => makeSessionMemoryConfig(tempDir, { excerptMessages: 3 }),
     });
 
     // Only last 3 messages should be present
@@ -324,6 +400,22 @@ describe("session-memory hook", () => {
     expect(memoryContent).toContain("user: Message 8");
     expect(memoryContent).toContain("user: Message 9");
     expect(memoryContent).toContain("user: Message 10");
+  });
+
+  it("supports includeExcerpt=false (no Conversation Excerpt section)", async () => {
+    const sessionContent = createMockSessionContent([
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "World" },
+    ]);
+    const { memoryContent } = await runNewWithPreviousSession({
+      sessionContent,
+      cfg: (tempDir) => makeSessionMemoryConfig(tempDir, { includeExcerpt: false }),
+    });
+
+    expect(memoryContent).not.toContain("## Conversation Excerpt");
+    expect(memoryContent).not.toContain("## Conversation Summary");
+    expect(memoryContent).not.toContain("user: Hello");
+    expect(memoryContent).not.toContain("assistant: World");
   });
 
   it("filters messages before slicing (fix for #2681)", async () => {
@@ -525,5 +617,123 @@ describe("session-memory hook", () => {
     // Both messages should be included
     expect(memoryContent).toContain("user: Only message 1");
     expect(memoryContent).toContain("assistant: Only message 2");
+  });
+
+  it("does not call summary generator when summary is disabled (default)", async () => {
+    mockGenerateSessionSummary.mockClear();
+    const sessionContent = createMockSessionContent([
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "World" },
+    ]);
+    await runNewWithPreviousSession({ sessionContent });
+
+    // summary config is false by default → generator should not be called
+    expect(mockGenerateSessionSummary).not.toHaveBeenCalled();
+  });
+
+  it("does not call summary generator in test environment even when enabled", async () => {
+    mockGenerateSessionSummary.mockClear();
+    const sessionContent = createMockSessionContent([
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "World" },
+    ]);
+    // Even with summary: true, the test env guard should prevent calling the LLM.
+    await runNewWithPreviousSession({
+      sessionContent,
+      cfg: (tempDir) => ({
+        agents: { defaults: { workspace: tempDir } },
+        hooks: {
+          internal: {
+            entries: {
+              "session-memory": { enabled: true, summary: true },
+            },
+          },
+        },
+      }),
+    });
+
+    // In test env (VITEST=true), LLM calls are skipped.
+    expect(mockGenerateSessionSummary).not.toHaveBeenCalled();
+  });
+
+  it("uses 'Conversation Excerpt' heading (not 'Summary') when excerpt is included", async () => {
+    const sessionContent = createMockSessionContent([
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "World" },
+    ]);
+    const { memoryContent } = await runNewWithPreviousSession({ sessionContent });
+
+    expect(memoryContent).toContain("## Conversation Excerpt");
+    expect(memoryContent).not.toContain("## Conversation Summary");
+  });
+
+  it("inserts LLM summary before excerpt when summary is enabled and generation succeeds", async () => {
+    mockGenerateSessionSummary.mockClear();
+    mockGenerateSessionSummary.mockResolvedValueOnce({
+      markdown:
+        "## Summary\n\nThe user asked about widgets and the assistant explained widget theory.",
+    });
+
+    const sessionContent = createMockSessionContent([
+      { role: "user", content: "Tell me about widgets" },
+      { role: "assistant", content: "Widgets are fascinating devices." },
+    ]);
+
+    // Temporarily clear test-env signals to bypass the isTestEnv guard.
+    const origVitest = process.env.VITEST;
+    const origNodeEnv = process.env.NODE_ENV;
+    const origTestFast = process.env.OPENCLAW_TEST_FAST;
+    delete process.env.VITEST;
+    delete process.env.OPENCLAW_TEST_FAST;
+    process.env.NODE_ENV = "production";
+    try {
+      const { memoryContent } = await runNewWithPreviousSession({
+        sessionContent,
+        cfg: (tempDir) => ({
+          agents: { defaults: { workspace: tempDir } },
+          hooks: {
+            internal: {
+              entries: {
+                "session-memory": { enabled: true, summary: true },
+              },
+            },
+          },
+        }),
+      });
+
+      // Summary generator should have been called.
+      expect(mockGenerateSessionSummary).toHaveBeenCalledOnce();
+
+      // Summary markdown should appear in the output before the excerpt.
+      expect(memoryContent).toContain("## Summary");
+      expect(memoryContent).toContain("widget theory");
+      expect(memoryContent).toContain("## Conversation Excerpt");
+
+      // Summary should appear before the excerpt.
+      const summaryIdx = memoryContent.indexOf("## Summary");
+      const excerptIdx = memoryContent.indexOf("## Conversation Excerpt");
+      expect(summaryIdx).toBeLessThan(excerptIdx);
+    } finally {
+      process.env.VITEST = origVitest;
+      process.env.NODE_ENV = origNodeEnv;
+      if (origTestFast !== undefined) {
+        process.env.OPENCLAW_TEST_FAST = origTestFast;
+      }
+    }
+  });
+
+  it("still writes excerpt when summary generation would fail (graceful degradation)", async () => {
+    // This tests that even if the summary generator were to fail,
+    // the excerpt section is still written as a fallback.
+    const sessionContent = createMockSessionContent([
+      { role: "user", content: "Important question" },
+      { role: "assistant", content: "Important answer" },
+    ]);
+    const { memoryContent } = await runNewWithPreviousSession({ sessionContent });
+
+    // Excerpt should always be present when includeExcerpt is true (default)
+    expect(memoryContent).toContain("## Conversation Excerpt");
+    expect(memoryContent).toContain("user: Important question");
+    expect(memoryContent).toContain("assistant: Important answer");
   });
 });

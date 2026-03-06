@@ -18,8 +18,101 @@ import { hasInterSessionUserProvenance } from "../../../sessions/input-provenanc
 import { resolveHookConfig } from "../../config.js";
 import type { HookHandler } from "../../hooks.js";
 import { generateSlugViaLLM } from "../../llm-slug-generator.js";
+import { generateSessionSummary } from "./llm-summary.js";
 
 const log = createSubsystemLogger("hooks/session-memory");
+
+const UNTRUSTED_METADATA_BLOCK_RE =
+  /\n?\s*(Conversation info \(untrusted metadata\):|Replied message \(untrusted, for context\):)\s*\n```json\n[\s\S]*?\n```\s*/g;
+
+function stripNoiseBlocks(text: string): string {
+  // Remove large, noisy JSON metadata blocks that appear in tool-heavy sessions.
+  const stripped = text.replaceAll(UNTRUSTED_METADATA_BLOCK_RE, "\n");
+  return stripped.trim();
+}
+
+type SessionMemoryNoiseFilter = {
+  excludeExact: string[];
+  excludePrefixes: string[];
+  excludeRegexes: RegExp[];
+};
+
+function normaliseStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((v): v is string => typeof v === "string")
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
+function compileRegexes(patterns: string[]): RegExp[] {
+  const out: RegExp[] = [];
+  for (const pattern of patterns) {
+    try {
+      out.push(new RegExp(pattern));
+    } catch (err) {
+      log.warn("Invalid excludeRegexes pattern (skipped)", {
+        pattern,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return out;
+}
+
+function resolveNoiseFilter(hookConfig: unknown): SessionMemoryNoiseFilter {
+  // Hook configs are schema-free (Record<string, unknown>), so keep this defensive.
+  const cfg = (hookConfig ?? {}) as Record<string, unknown>;
+  const excludeExact = normaliseStringArray(cfg.excludeExact);
+  const excludePrefixes = normaliseStringArray(cfg.excludePrefixes);
+  const excludeRegexes = compileRegexes(normaliseStringArray(cfg.excludeRegexes));
+
+  return { excludeExact, excludePrefixes, excludeRegexes };
+}
+
+function isNoiseMessage(
+  role: string,
+  rawText: string,
+  noiseFilter: SessionMemoryNoiseFilter,
+): boolean {
+  const text = rawText.trim();
+
+  // Common automation markers.
+  if (text === "NO_REPLY" || text === "HEARTBEAT_OK") {
+    return true;
+  }
+
+  // Heartbeat prompts are not real conversation.
+  if (text.startsWith("Read HEARTBEAT.md") || text.startsWith("Default heartbeat prompt:")) {
+    return true;
+  }
+
+  // System / cron / tool plumbing messages often dominate excerpts.
+  if (
+    text.startsWith("System:") ||
+    text.startsWith("[System Message]") ||
+    text.includes("Queued messages while agent was busy")
+  ) {
+    return true;
+  }
+
+  // Configurable exclusions (for per-installation noise).
+  if (noiseFilter.excludeExact.includes(text)) {
+    return true;
+  }
+
+  if (noiseFilter.excludePrefixes.some((prefix) => text.startsWith(prefix))) {
+    return true;
+  }
+
+  if (noiseFilter.excludeRegexes.some((re) => re.test(text))) {
+    return true;
+  }
+
+  return false;
+}
 
 /**
  * Read recent messages from session file for slug generation
@@ -27,6 +120,11 @@ const log = createSubsystemLogger("hooks/session-memory");
 async function getRecentSessionContent(
   sessionFilePath: string,
   messageCount: number = 15,
+  noiseFilter: SessionMemoryNoiseFilter = {
+    excludeExact: [],
+    excludePrefixes: [],
+    excludeRegexes: [],
+  },
 ): Promise<string | null> {
   try {
     const content = await fs.readFile(sessionFilePath, "utf-8");
@@ -45,14 +143,25 @@ async function getRecentSessionContent(
             if (role === "user" && hasInterSessionUserProvenance(msg)) {
               continue;
             }
+
             // Extract text content
-            const text = Array.isArray(msg.content)
+            const textRaw = Array.isArray(msg.content)
               ? // oxlint-disable-next-line typescript/no-explicit-any
                 msg.content.find((c: any) => c.type === "text")?.text
               : msg.content;
-            if (text && !text.startsWith("/")) {
-              allMessages.push(`${role}: ${text}`);
+
+            if (!textRaw) {
+              continue;
             }
+
+            const text = stripNoiseBlocks(String(textRaw));
+
+            // Filter slash-commands, and common noise patterns.
+            if (!text || text.startsWith("/") || isNoiseMessage(role, text, noiseFilter)) {
+              continue;
+            }
+
+            allMessages.push(`${role}: ${text}`);
           }
         }
       } catch {
@@ -75,8 +184,13 @@ async function getRecentSessionContent(
 async function getRecentSessionContentWithResetFallback(
   sessionFilePath: string,
   messageCount: number = 15,
+  noiseFilter: SessionMemoryNoiseFilter = {
+    excludeExact: [],
+    excludePrefixes: [],
+    excludeRegexes: [],
+  },
 ): Promise<string | null> {
-  const primary = await getRecentSessionContent(sessionFilePath, messageCount);
+  const primary = await getRecentSessionContent(sessionFilePath, messageCount, noiseFilter);
   if (primary) {
     return primary;
   }
@@ -93,7 +207,7 @@ async function getRecentSessionContentWithResetFallback(
     }
 
     const latestResetPath = path.join(dir, resetCandidates[resetCandidates.length - 1]);
-    const fallback = await getRecentSessionContent(latestResetPath, messageCount);
+    const fallback = await getRecentSessionContent(latestResetPath, messageCount, noiseFilter);
 
     if (fallback) {
       log.debug("Loaded session content from reset fallback", {
@@ -143,8 +257,7 @@ async function findPreviousSessionFile(params: {
             name.endsWith(".jsonl") &&
             !name.includes(".reset."),
         )
-        .toSorted()
-        .toReversed();
+        .toSorted((a, b) => b.localeCompare(a));
       if (topicVariants.length > 0) {
         return path.join(params.sessionsDir, topicVariants[0]);
       }
@@ -156,8 +269,7 @@ async function findPreviousSessionFile(params: {
 
     const nonResetJsonl = files
       .filter((name) => name.endsWith(".jsonl") && !name.includes(".reset."))
-      .toSorted()
-      .toReversed();
+      .toSorted((a, b) => b.localeCompare(a));
     if (nonResetJsonl.length > 0) {
       return path.join(params.sessionsDir, nonResetJsonl[0]);
     }
@@ -235,28 +347,51 @@ const saveSessionToMemory: HookHandler = async (event) => {
 
     // Read message count from hook config (default: 15)
     const hookConfig = resolveHookConfig(cfg, "session-memory");
-    const messageCount =
-      typeof hookConfig?.messages === "number" && hookConfig.messages > 0
-        ? hookConfig.messages
-        : 15;
+    const excerptMessages =
+      typeof hookConfig?.excerptMessages === "number" && hookConfig.excerptMessages > 0
+        ? hookConfig.excerptMessages
+        : typeof hookConfig?.messages === "number" && hookConfig.messages > 0
+          ? hookConfig.messages
+          : 15;
+    const includeExcerpt = hookConfig?.includeExcerpt !== false;
+
+    const noiseFilter = resolveNoiseFilter(hookConfig);
+
+    // Summary config.
+    const summaryEnabled = hookConfig?.summary === true;
+    const summaryModel =
+      typeof hookConfig?.summaryModel === "string" ? hookConfig.summaryModel : undefined;
+    const summaryMaxTokens =
+      typeof hookConfig?.summaryMaxTokens === "number" && hookConfig.summaryMaxTokens > 0
+        ? hookConfig.summaryMaxTokens
+        : undefined;
 
     let slug: string | null = null;
     let sessionContent: string | null = null;
 
-    if (sessionFile) {
+    // We need session content for both the excerpt and the summary, so load it
+    // when *either* feature is enabled.
+    const needsSessionContent = includeExcerpt || summaryEnabled;
+
+    // Avoid calling model providers in unit tests; keep hooks fast and deterministic.
+    const isTestEnv =
+      process.env.OPENCLAW_TEST_FAST === "1" ||
+      process.env.VITEST === "true" ||
+      process.env.VITEST === "1" ||
+      process.env.NODE_ENV === "test";
+
+    if (sessionFile && needsSessionContent) {
       // Get recent conversation content, with fallback to rotated reset transcript.
-      sessionContent = await getRecentSessionContentWithResetFallback(sessionFile, messageCount);
+      sessionContent = await getRecentSessionContentWithResetFallback(
+        sessionFile,
+        excerptMessages,
+        noiseFilter,
+      );
       log.debug("Session content loaded", {
         length: sessionContent?.length ?? 0,
-        messageCount,
+        excerptMessages,
       });
 
-      // Avoid calling the model provider in unit tests; keep hooks fast and deterministic.
-      const isTestEnv =
-        process.env.OPENCLAW_TEST_FAST === "1" ||
-        process.env.VITEST === "true" ||
-        process.env.VITEST === "1" ||
-        process.env.NODE_ENV === "test";
       const allowLlmSlug = !isTestEnv && hookConfig?.llmSlug !== false;
 
       if (sessionContent && cfg && allowLlmSlug) {
@@ -299,9 +434,27 @@ const saveSessionToMemory: HookHandler = async (event) => {
       "",
     ];
 
-    // Include conversation content if available
-    if (sessionContent) {
-      entryParts.push("## Conversation Summary", "", sessionContent, "");
+    // LLM-generated summary (opt-in).
+    if (summaryEnabled && sessionContent && cfg) {
+      if (!isTestEnv) {
+        log.debug("Generating LLM session summary...");
+        const summaryResult = await generateSessionSummary({
+          sessionContent,
+          cfg,
+          summaryModel,
+          summaryMaxTokens,
+        });
+        if (summaryResult) {
+          entryParts.push(summaryResult.markdown, "");
+        } else {
+          log.warn("LLM summary generation failed; falling back to excerpt only");
+        }
+      }
+    }
+
+    // Include conversation excerpt if available and enabled.
+    if (sessionContent && includeExcerpt) {
+      entryParts.push("## Conversation Excerpt", "", sessionContent, "");
     }
 
     const entry = entryParts.join("\n");
